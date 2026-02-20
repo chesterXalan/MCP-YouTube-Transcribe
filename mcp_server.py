@@ -64,6 +64,10 @@ try:
                             "type": "boolean",
                             "description": "Force the use of Whisper for transcription, even if an official transcript is available",
                             "default": False
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "Language code for transcription (e.g., 'en', 'ja', 'zh'). Defaults to auto-detect."
                         }
                     },
                     "required": ["query"]
@@ -90,10 +94,11 @@ try:
             raise ValueError("Missing required argument: query")
 
         force_whisper = arguments.get("force_whisper", False)
+        language = arguments.get("language")
 
         try:
             # The import is no longer here. We just call the function directly.
-            result = get_youtube_transcript(query=query, force_whisper=force_whisper)
+            result = get_youtube_transcript(query=query, force_whisper=force_whisper, language=language)
             logging.info(f"youtube_tool returned with status: {result.get('status')}")
 
             if result.get("status") == "success":

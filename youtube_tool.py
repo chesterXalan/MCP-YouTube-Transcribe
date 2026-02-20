@@ -3,6 +3,7 @@ import os
 import subprocess
 import json
 import multiprocessing
+import urllib.request
 import whisper
 import yt_dlp
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
@@ -13,8 +14,71 @@ from pytube.exceptions import PytubeError
 # This will get the logger that was configured in mcp_server.py
 logger = logging.getLogger(__name__)
 
+# Supported Whisper model names (compatible with both whisper.cpp and Python Whisper)
+VALID_MODELS = ("tiny", "base", "small", "medium", "large-v2", "large-v3", "large-v3-turbo")
+
+# Mapping from model name to whisper.cpp ggml filename
+WHISPER_CPP_FILENAMES = {name: f"ggml-{name}.bin" for name in VALID_MODELS}
+
+# HuggingFace base URL for downloading whisper.cpp models
+HUGGINGFACE_BASE_URL = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+
 # A simple cache for the Whisper model so we don't reload it every time
 _whisper_model = None
+_whisper_model_name: str | None = None
+
+
+def _get_config() -> dict:
+    """Read Whisper configuration from environment variables."""
+    model_name = os.getenv("WHISPER_MODEL", "tiny").strip()
+    if model_name not in VALID_MODELS:
+        raise ValueError(
+            f"Invalid WHISPER_MODEL '{model_name}'. Valid options: {', '.join(VALID_MODELS)}"
+        )
+
+    model_dir = os.getenv("WHISPER_MODEL_DIR", "").strip()
+    if not model_dir:
+        model_dir = os.path.join(os.path.dirname(__file__), "models")
+
+    language = os.getenv("WHISPER_LANGUAGE", "auto").strip()
+
+    return {"model_name": model_name, "model_dir": model_dir, "language": language}
+
+
+def _download_model(model_name: str, model_dir: str) -> str:
+    """
+    Ensure the whisper.cpp model file exists, downloading from HuggingFace if needed.
+    Returns the absolute path to the model file.
+    """
+    filename = WHISPER_CPP_FILENAMES[model_name]
+    model_path = os.path.join(model_dir, filename)
+
+    if os.path.exists(model_path):
+        return model_path
+
+    os.makedirs(model_dir, exist_ok=True)
+    url = f"{HUGGINGFACE_BASE_URL}/{filename}"
+    tmp_path = model_path + ".downloading"
+
+    logger.info(f"Model '{model_name}' not found at {model_path}. Downloading from {url} ...")
+
+    def _progress_hook(block_num, block_size, total_size):
+        if total_size > 0:
+            percent = block_num * block_size * 100 / total_size
+            # Log every ~10%
+            if int(percent) % 10 == 0 and int(percent) != int((block_num - 1) * block_size * 100 / total_size):
+                logger.info(f"Downloading {model_name}: {min(percent, 100):.0f}%")
+
+    try:
+        urllib.request.urlretrieve(url, tmp_path, reporthook=_progress_hook)
+        os.rename(tmp_path, model_path)
+        logger.info(f"Model '{model_name}' downloaded successfully to {model_path}")
+        return model_path
+    except Exception as e:
+        # Clean up partial download
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
+        raise RuntimeError(f"Failed to download model '{model_name}' from {url}: {e}") from e
 
 
 def _check_whisper_cpp():
@@ -30,16 +94,19 @@ def _check_whisper_cpp():
         return False
 
 
-def _transcribe_with_whisper_cpp(audio_path):
+def _transcribe_with_whisper_cpp(audio_path, model_name: str = "tiny", model_dir: str = "", language: str = "auto"):
     """
     Transcribe audio using whisper.cpp.
     Returns the transcript text if successful, None if failed.
     """
     try:
         logger.info("Attempting transcription with whisper.cpp...")
-        model_path = os.path.join(os.path.dirname(__file__), "models", "ggml-tiny.bin")
-        if not os.path.exists(model_path):
-            logger.error(f"Model file not found at {model_path}")
+
+        # Try to get (or download) the model
+        try:
+            model_path = _download_model(model_name, model_dir)
+        except (RuntimeError, KeyError) as e:
+            logger.error(f"Could not obtain whisper.cpp model: {e}")
             return None
 
         # Convert MP3 to WAV
@@ -68,6 +135,7 @@ def _transcribe_with_whisper_cpp(audio_path):
             'whisper-cli',
             '-m', model_path,
             '-t', str(threads),  # multi-threading
+            '--language', language,
             '--output-json-full',
             '--no-timestamps',
             wav_path
@@ -86,7 +154,7 @@ def _transcribe_with_whisper_cpp(audio_path):
         if result.returncode == 0:
             try:
                 # Read the JSON output from the file
-                with open(json_output_path, 'r') as f:
+                with open(json_output_path, 'r', encoding='utf-8', errors='replace') as f:
                     output = json.load(f)
 
                 # Clean up the JSON file
@@ -173,14 +241,21 @@ def _download_audio_with_fallbacks(video_url: str, audio_path: str) -> bool:
         return False
 
 
-def get_youtube_transcript(query: str, force_whisper: bool = False) -> dict:
+def get_youtube_transcript(query: str, force_whisper: bool = False, language: str | None = None) -> dict:
     """
     Searches for a YouTube video, downloads it, and returns the transcript.
     It will try to get an official transcript first, unless force_whisper is True.
     If force_whisper is True, it will try whisper.cpp first, then fall back to Python whisper.
     """
-    global _whisper_model
-    logger.info(f"get_youtube_transcript called with query: '{query}', force_whisper: {force_whisper}")
+    global _whisper_model, _whisper_model_name
+
+    config = _get_config()
+    effective_language = language or config["language"]
+
+    logger.info(
+        f"get_youtube_transcript called with query: '{query}', force_whisper: {force_whisper}, "
+        f"language: {effective_language}, model: {config['model_name']}"
+    )
 
     try:
         # --- 1. Search for the video and get its info (using yt-dlp for robust search) ---
@@ -265,7 +340,12 @@ def get_youtube_transcript(query: str, force_whisper: bool = False) -> dict:
 
         # First try whisper.cpp if available
         if _check_whisper_cpp():
-            transcript_text = _transcribe_with_whisper_cpp(audio_path)
+            transcript_text = _transcribe_with_whisper_cpp(
+                audio_path,
+                model_name=config["model_name"],
+                model_dir=config["model_dir"],
+                language=effective_language,
+            )
             if transcript_text:
                 transcript_source = "whisper.cpp (AI Generated)"
                 logger.info("Successfully transcribed using whisper.cpp")
@@ -275,13 +355,18 @@ def get_youtube_transcript(query: str, force_whisper: bool = False) -> dict:
             logger.info("Falling back to Python whisper...")
             transcript_source = "Python Whisper (AI Generated)"
 
-            if _whisper_model is None:
-                logger.info("Whisper model not loaded. Loading 'tiny' model now...")
-                _whisper_model = whisper.load_model("tiny")
-                logger.info("Whisper model 'tiny' loaded successfully.")
+            target_model = config["model_name"]
+            if _whisper_model is None or _whisper_model_name != target_model:
+                logger.info(f"Loading Python Whisper model '{target_model}'...")
+                _whisper_model = whisper.load_model(target_model)
+                _whisper_model_name = target_model
+                logger.info(f"Whisper model '{target_model}' loaded successfully.")
+
+            # Python Whisper uses None for auto-detect, not the string "auto"
+            whisper_lang = None if effective_language == "auto" else effective_language
 
             logger.info("Starting Python Whisper transcription...")
-            result = _whisper_model.transcribe(audio_path, fp16=False)
+            result = _whisper_model.transcribe(audio_path, fp16=False, language=whisper_lang)
             transcript_text = result["text"]
             logger.info("Python Whisper transcription complete.")
 
