@@ -34,7 +34,7 @@ communicating with an MCP server.
 
   After installation, make sure the `whisper-cli` (or `whisper-cpp` on older versions) command is in your PATH.
 
-  Finally, download a Whisper model. The **tiny** model offers the best speed-to-quality ratio for most use-cases:
+  Models are **automatically downloaded** on first use — no manual setup needed. If you prefer to pre-download a model:
 
   ```bash
   mkdir -p models
@@ -42,7 +42,7 @@ communicating with an MCP server.
        https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.bin
   ```
 
-  Place additional models in the same `models/` folder if you wish to experiment.
+  To use a different model, set the `WHISPER_MODEL` environment variable (see [Configuration](#configuration)).
 
 ## Installation with `uv`
 
@@ -229,7 +229,7 @@ Here is an example of a `call_tool` request to get a transcript for the query "W
 
 **Request:**
 
-```json 
+```json
 {
   "jsonrpc": "2.0",
   "id": 1,
@@ -238,15 +238,17 @@ Here is an example of a `call_tool` request to get a transcript for the query "W
     "name": "get_youtube_transcript",
     "arguments": {
       "query": "What is an API? by MuleSoft",
-      "force_whisper": false
+      "force_whisper": false,
+      "language": "en"
     }
   }
 }
-``` 
+```
 
 * `query`: The search term for the YouTube video.
 * `force_whisper`: (Optional) A boolean that, if `true`, skips the check for an official transcript and generates one
   directly with Whisper. Defaults to `false`.
+* `language`: (Optional) Language code for transcription (e.g., `en`, `ja`, `zh`). Overrides the `WHISPER_LANGUAGE` environment variable. Defaults to auto-detect.
 
 ## Testing
 
@@ -265,6 +267,17 @@ This project includes a test suite to verify its functionality.
   ```
 
 ## Configuration
+
+The server can be configured via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WHISPER_MODEL` | `tiny` | Whisper model to use. Options: `tiny`, `base`, `small`, `medium`, `large-v2`, `large-v3`, `large-v3-turbo` |
+| `WHISPER_MODEL_DIR` | `./models` | Directory for storing model files |
+| `WHISPER_LANGUAGE` | `auto` | Default language for transcription (e.g., `en`, `ja`, `zh`). Can be overridden per-request via the `language` tool parameter |
+| `WHISPER_THREADS` | CPU core count | Number of threads for whisper.cpp |
+
+Models are **automatically downloaded** from HuggingFace on first use if not already present in the model directory.
 
 * **Logging:** Server activity is logged to `mcp_server.log`.
 * **Audio Cache:** When Whisper is used, downloaded audio files are temporarily stored in `testing/audio_cache/`. You
