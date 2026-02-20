@@ -284,7 +284,8 @@ def get_youtube_transcript(query: str, force_whisper: bool = False, language: st
         if not force_whisper and video_id:
             logger.info("Attempting to fetch official YouTube transcript...")
             try:
-                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                api = YouTubeTranscriptApi()
+                transcript_list = api.list(video_id)
                 # Prioritize manually created transcripts, then auto-generated
                 transcript_obj = None
                 for t in transcript_list:
@@ -298,9 +299,9 @@ def get_youtube_transcript(query: str, force_whisper: bool = False, language: st
                         break  # Found best option, exit loop
 
                 if transcript_obj:
-                    # Fetch the actual transcript parts
-                    transcript_parts = transcript_obj.fetch()
-                    transcript_text = " ".join([item.text for item in transcript_parts])
+                    # Fetch the actual transcript using the selected language
+                    fetched = api.fetch(video_id, languages=[transcript_obj.language_code])
+                    transcript_text = " ".join([snippet.text for snippet in fetched])
                     transcript_source = f"Official YouTube Captions ({'Generated' if transcript_obj.is_generated else 'Manual'})"
                     logger.info("Successfully fetched official YouTube transcript.")
                 else:
