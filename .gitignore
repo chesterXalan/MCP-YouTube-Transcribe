@@ -29,6 +29,9 @@ htmlcov/
 # Cache for downloaded YouTube audio files from youtube_tool.py
 testing/audio_cache/
 
+# Whisper model files
+models/
+
 # Environment variables
 .env
 
