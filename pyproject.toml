@@ -11,3 +11,8 @@ dependencies = [
     "mcp",
     "pytube"
 ]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
