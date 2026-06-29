@@ -4,6 +4,7 @@ import os
 import subprocess
 import json
 import multiprocessing
+import tempfile
 import urllib.request
 import requests
 import whisper
@@ -72,8 +73,6 @@ def _fetch_subtitle_via_yt_dlp(video_url: str, language: str) -> tuple[str | Non
 
     Returns (transcript_text, is_auto_generated). transcript_text is None if no subs available.
     """
-    import tempfile
-    import json as _json
 
     if language and language != "auto":
         lang_specs = [language, f"{language}.*", "en", "en.*"]
@@ -114,7 +113,7 @@ def _fetch_subtitle_via_yt_dlp(video_url: str, language: str) -> tuple[str | Non
         full_path = os.path.join(tmpdir, chosen)
         try:
             if chosen.endswith('.json3'):
-                data = _json.load(open(full_path, encoding='utf-8'))
+                data = json.load(open(full_path, encoding='utf-8'))
                 texts = []
                 for e in data.get('events', []):
                     for seg in (e.get('segs') or []):
@@ -488,57 +487,57 @@ def get_youtube_transcript(query: str, force_whisper: bool = False, language: st
         # This block only runs if transcript_text is still None after the official transcript attempt
         logger.info(
             "Proceeding to audio download and Whisper transcription as no official transcript was available or force_whisper is True.")
-        output_dir = os.path.join(os.path.dirname(__file__), "testing", "audio_cache")
-        os.makedirs(output_dir, exist_ok=True)
-        audio_path = os.path.join(output_dir, f"{video_info.get('id', 'default_id')}.mp3")
 
-        logger.info(f"Downloading audio to: {audio_path}")
-        download_successful = _download_audio_with_fallbacks(video_url, audio_path)
+        with tempfile.TemporaryDirectory(prefix="ytaudio_") as audio_dir:
+            audio_path = os.path.join(audio_dir, f"{video_info.get('id', 'default_id')}.mp3")
 
-        if not download_successful:
-            message = "Failed to download audio using all available methods (yt-dlp, pytube)."
-            logger.error(message)
-            return {"status": "error", "message": message}
+            logger.info(f"Downloading audio to: {audio_path}")
+            download_successful = _download_audio_with_fallbacks(video_url, audio_path)
 
-        # First try whisper.cpp if available
-        if _check_whisper_cpp():
-            transcript_text = _transcribe_with_whisper_cpp(
-                audio_path,
-                model_name=config["model_name"],
-                model_dir=config["model_dir"],
-                language=effective_language,
-            )
-            if transcript_text:
-                transcript_source = "whisper.cpp (AI Generated)"
-                logger.info("Successfully transcribed using whisper.cpp")
+            if not download_successful:
+                message = "Failed to download audio using all available methods (yt-dlp, pytube)."
+                logger.error(message)
+                return {"status": "error", "message": message}
 
-        # Fall back to Python whisper if whisper.cpp failed or isn't available
-        if transcript_text is None:
-            logger.info("Falling back to Python whisper...")
-            transcript_source = "Python Whisper (AI Generated)"
+            # First try whisper.cpp if available
+            if _check_whisper_cpp():
+                transcript_text = _transcribe_with_whisper_cpp(
+                    audio_path,
+                    model_name=config["model_name"],
+                    model_dir=config["model_dir"],
+                    language=effective_language,
+                )
+                if transcript_text:
+                    transcript_source = "whisper.cpp (AI Generated)"
+                    logger.info("Successfully transcribed using whisper.cpp")
 
-            target_model = config["model_name"]
-            if _whisper_model is None or _whisper_model_name != target_model:
-                logger.info(f"Loading Python Whisper model '{target_model}'...")
-                _whisper_model = whisper.load_model(target_model)
-                _whisper_model_name = target_model
-                logger.info(f"Whisper model '{target_model}' loaded successfully.")
+            # Fall back to Python whisper if whisper.cpp failed or isn't available
+            if transcript_text is None:
+                logger.info("Falling back to Python whisper...")
+                transcript_source = "Python Whisper (AI Generated)"
 
-            # Python Whisper uses None for auto-detect, not the string "auto"
-            whisper_lang = None if effective_language == "auto" else effective_language
+                target_model = config["model_name"]
+                if _whisper_model is None or _whisper_model_name != target_model:
+                    logger.info(f"Loading Python Whisper model '{target_model}'...")
+                    _whisper_model = whisper.load_model(target_model)
+                    _whisper_model_name = target_model
+                    logger.info(f"Whisper model '{target_model}' loaded successfully.")
 
-            logger.info("Starting Python Whisper transcription...")
-            result = _whisper_model.transcribe(audio_path, fp16=False, language=whisper_lang)
-            transcript_text = result["text"]
-            logger.info("Python Whisper transcription complete.")
+                # Python Whisper uses None for auto-detect, not the string "auto"
+                whisper_lang = None if effective_language == "auto" else effective_language
 
-        return {
-            "status": "success",
-            "title": video_title,
-            "url": video_url,
-            "source": transcript_source,
-            "transcript": transcript_text
-        }
+                logger.info("Starting Python Whisper transcription...")
+                result = _whisper_model.transcribe(audio_path, fp16=False, language=whisper_lang)
+                transcript_text = result["text"]
+                logger.info("Python Whisper transcription complete.")
+
+            return {
+                "status": "success",
+                "title": video_title,
+                "url": video_url,
+                "source": transcript_source,
+                "transcript": transcript_text
+            }
 
     except DownloadError as e:
         logger.error(f"yt-dlp download error during info extraction: {e}", exc_info=True)
